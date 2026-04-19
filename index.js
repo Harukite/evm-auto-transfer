@@ -6,6 +6,7 @@ const readlineSync = require("readline-sync");
 const checkBalance = require("./src/checkBalance");
 const displayHeader = require("./src/displayHeader");
 const sleep = require("./src/sleep");
+const sendWithRetry = require("./src/sendTransaction");
 const { loadChains, selectChain, selectNetworkType } = require("./src/chainUtils");
 
 const MAX_RETRIES = 5;
@@ -88,6 +89,15 @@ const main = async () => {
 
     printSenderBalance();
 
+    let nonce;
+    try {
+      nonce = await retry(() => provider.getTransactionCount(senderAddress, "pending"));
+    } catch (error) {
+      console.log(colors.red(`❌ Failed to fetch nonce for ${senderAddress}. Skipping.`));
+      continuePrintingBalance = false;
+      continue;
+    }
+
     for (let i = 1; i <= transactionCount; i++) {
       const receiverWallet = ethers.Wallet.createRandom();
       const receiverAddress = receiverWallet.address;
@@ -117,14 +127,22 @@ const main = async () => {
         value: amountToSend,
         gasLimit: 21000,
         gasPrice: gasPrice,
+        nonce: nonce,
         chainId: parseInt(selectedChain.chainId),
       };
 
       let tx;
       try {
-        tx = await retry(() => wallet.sendTransaction(transaction));
+        tx = await sendWithRetry(wallet, transaction, {
+          maxRetries: MAX_RETRIES,
+          delay: RETRY_DELAY,
+        });
+        nonce += 1;
       } catch (error) {
         console.log(colors.red(`❌ Failed to send transaction: ${error.message}`));
+        try {
+          nonce = await provider.getTransactionCount(senderAddress, "pending");
+        } catch (_) {}
         continue;
       }
 
