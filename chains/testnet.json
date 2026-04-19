@@ -187,5 +187,12 @@
     "chainId": "9496",
     "symbol": "tWVM",
     "explorer": "https://explorer.wvm.dev"
+  }, 
+  {
+    "name": "DAC Testnet",
+    "rpcUrl": "https://rpctest.dachain.tech",
+    "chainId": "21894",
+    "symbol": "DACC",
+    "explorer": "https://exptest.dachain.tech"
   }
 ]
