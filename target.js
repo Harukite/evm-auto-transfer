@@ -6,6 +6,7 @@ const readlineSync = require("readline-sync");
 const checkBalance = require("./src/checkBalance");
 const displayHeader = require("./src/displayHeader");
 const sleep = require("./src/sleep");
+const sendWithRetry = require("./src/sendTransaction");
 const { loadChains, selectChain, selectNetworkType } = require("./src/chainUtils");
 
 const MAX_RETRIES = 5;
@@ -89,6 +90,15 @@ const main = async () => {
 
     printSenderBalance();
 
+    let nonce;
+    try {
+      nonce = await retry(() => provider.getTransactionCount(senderAddress, "pending"));
+    } catch (error) {
+      console.log(colors.red(`❌ Failed to fetch nonce for ${senderAddress}. Skipping.`));
+      continuePrintingBalance = false;
+      continue;
+    }
+
     for (let i = 1; i <= transactionCount; i++) {
       for (const receiverAddress of recipientAddresses) {
         console.log(colors.white(`\n🆕 Sending transaction ${i} to: ${receiverAddress}`));
@@ -98,9 +108,19 @@ const main = async () => {
           "ether"
         );
 
-        let gasPrice;
+        let feeOverrides;
         try {
-          gasPrice = (await provider.getFeeData()).gasPrice;
+          const feeData = await provider.getFeeData();
+          if (feeData.maxFeePerGas != null && feeData.maxPriorityFeePerGas != null) {
+            feeOverrides = {
+              maxFeePerGas: feeData.maxFeePerGas,
+              maxPriorityFeePerGas: feeData.maxPriorityFeePerGas,
+            };
+          } else if (feeData.gasPrice != null) {
+            feeOverrides = { gasPrice: feeData.gasPrice };
+          } else {
+            throw new Error("No fee data returned");
+          }
         } catch (error) {
           console.log(colors.red("❌ Failed to fetch gas price from the network."));
           continue;
@@ -110,15 +130,24 @@ const main = async () => {
           to: receiverAddress,
           value: amountToSend,
           gasLimit: 21000,
-          gasPrice: gasPrice,
+          nonce: nonce,
           chainId: parseInt(selectedChain.chainId),
+          ...feeOverrides,
         };
 
         let tx;
         try {
-          tx = await retry(() => wallet.sendTransaction(transaction));
+          const result = await sendWithRetry(wallet, transaction, {
+            maxRetries: MAX_RETRIES,
+            delay: RETRY_DELAY,
+          });
+          tx = result.response;
+          nonce = result.nextNonce;
         } catch (error) {
           console.log(colors.red(`❌ Failed to send transaction: ${error.message}`));
+          try {
+            nonce = await provider.getTransactionCount(senderAddress, "pending");
+          } catch (_) {}
           continue;
         }
 
@@ -133,15 +162,14 @@ const main = async () => {
             }`
           )
         );
-        console.log(
-          colors.white(`  Gas Price: ${colors.green(ethers.formatUnits(gasPrice, "gwei"))} Gwei`)
-        );
-
-        await sleep(15000);
+        const feeLabel = feeOverrides.maxFeePerGas
+          ? `Max Fee: ${colors.green(ethers.formatUnits(feeOverrides.maxFeePerGas, "gwei"))} Gwei`
+          : `Gas Price: ${colors.green(ethers.formatUnits(feeOverrides.gasPrice, "gwei"))} Gwei`;
+        console.log(colors.white(`  ${feeLabel}`));
 
         let receipt;
         try {
-          receipt = await retry(() => provider.getTransactionReceipt(tx.hash));
+          receipt = await provider.waitForTransaction(tx.hash, 1, 60000);
           if (receipt) {
             if (receipt.status === 1) {
               console.log(colors.green("✅ Transaction Success!"));
@@ -154,7 +182,7 @@ const main = async () => {
               console.log(colors.red("❌ Transaction FAILED"));
             }
           } else {
-            console.log(colors.yellow("⏳ Transaction is still pending after multiple retries."));
+            console.log(colors.yellow("⏳ Transaction is still pending after 60s."));
           }
         } catch (error) {
           console.log(colors.red(`❌ Error checking transaction status: ${error.message}`));
